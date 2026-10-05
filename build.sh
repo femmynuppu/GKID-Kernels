@@ -19,7 +19,7 @@ RELEASE="$(date +v%y.%m.%d)${RUN_NUM}"
 
 mkdir -p $RELEASE_DIR
 
-GKI_RELEASES_REPO="https://github.com/ahmed-alnassif/GKID-Kernels"
+GKI_RELEASES_REPO="https://github.com/${GITHUB_REPOSITORY:-femmynuppu/GKID-Kernels}"
 AK3_ZIP_NAME="$KERNEL_NAME-VARIANT-REL-KVER.zip"
 OUTDIR="$WORKDIR/out"
 KSRC="$WORKDIR/ksrc"
@@ -213,7 +213,7 @@ fi
 set -eo pipefail
 if susfs_included && [ "$KSU" = "RSKSU" ]; then
   log "ReSukiSU included"
-  install_ksu "ReSukiSU/ReSukiSU" "main"
+  install_ksu "Baka-SU/BakaSU" "main"
 
   clone_susfs
   apply_susfs_patches
@@ -266,7 +266,7 @@ echo "VARIANT=$VARIANT" >> $GITHUB_ENV
 
 if [ "$NM" = "true" ]; then
   log "Applying NoMount"
-  curl "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -s master
+  curl -fLSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/master/kernel/setup.sh" | bash -s master
 fi
 echo "::endgroup::"
 set +eo pipefail
@@ -277,7 +277,30 @@ AK3_ZIP_NAME=${AK3_ZIP_NAME//VARIANT/$VARIANT}
 log "Applying configs..."
 source "$WORKDIR/configs/gki_defconfig.sh"
 
-if [ "${TODO:-kernel}" = "kernel" ]; then
+# Android 12 / 5.10 predates the ZRAM_DEF_COMP_LZ4 Kconfig choice.
+if [ "$KERNEL_VERSION" = "5.10" ]; then
+  python3 - <<'ZRAM_PY'
+from pathlib import Path
+p = Path("drivers/block/zram/zram_drv.c")
+s = p.read_text()
+old = 'static const char *default_compressor = "lzo-rle";'
+new = 'static const char *default_compressor = "lz4";'
+if old not in s and new not in s:
+    raise SystemExit("Unrecognized ZRAM default compressor declaration")
+p.write_text(s.replace(old, new))
+ZRAM_PY
+fi
+
+if [ -n "${SPOOF_UNAME:-}" ]; then
+  if [[ ! "$SPOOF_UNAME" =~ ^[A-Za-z0-9._+-]{1,64}$ ]]; then
+    echo "Invalid SPOOF_UNAME (must be a safe kernel release of at most 64 characters)" >&2
+    exit 1
+  fi
+  config --set-str CONFIG_LOCALVERSION ""
+  config --disable CONFIG_LOCALVERSION_AUTO
+fi
+
+if [ "${TODO:-kernel}" = "kernel" ] && [ -z "${SPOOF_UNAME:-}" ]; then
   LATEST_COMMIT_HASH=$(git rev-parse --short HEAD)
   SUFFIX="${RELEASE}/${LATEST_COMMIT_HASH}"
   config --set-str CONFIG_LOCALVERSION "-$KERNEL_NAME/$SUFFIX"
@@ -288,6 +311,14 @@ fi
 export KBUILD_BUILD_USER="$USER"
 export KBUILD_BUILD_HOST="$HOST"
 export KBUILD_BUILD_TIMESTAMP=$(git -C $KSRC log -1 --format=%cd --date=format-local:'%a %b %d %T %z %Y')
+if [ -n "${SPOOF_BUILD_TIME:-}" ]; then
+  export TZ=UTC
+  if ! date -u -d "$SPOOF_BUILD_TIME" >/dev/null; then
+    echo "Invalid SPOOF_BUILD_TIME" >&2
+    exit 1
+  fi
+  export KBUILD_BUILD_TIMESTAMP="$SPOOF_BUILD_TIME"
+fi
 export KCFLAGS="-w"
 
 LINK_CACHE_PATH="/dev/shm/thinlto-cache"
@@ -317,6 +348,10 @@ exec ld.lld "\$@" --thinlto-cache-dir="$LINK_CACHE_PATH" --thinlto-jobs=\$JOBCOU
 SHIM
     chmod +x "$LINKER_SHIM"
     MAKE_ARGS+=(LD="$LINKER_SHIM" HOSTLD="$LINKER_SHIM")
+fi
+
+if [ -n "${SPOOF_UNAME:-}" ]; then
+  MAKE_ARGS+=("KERNELRELEASE=$SPOOF_UNAME")
 fi
 
 KERNEL_IMAGE="$OUTDIR/arch/arm64/boot/Image"
@@ -464,6 +499,35 @@ set +eo pipefail
 
 cd $WORKDIR
 
+# Validate the actual generated config and release before packaging.
+set -eo pipefail
+for symbol in CONFIG_TCP_CONG_BBR CONFIG_BBG CONFIG_ZRAM CONFIG_CRYPTO_LZ4 CONFIG_CRYPTO_LZ4HC CONFIG_CRYPTO_ZSTD; do
+  grep -qx "$symbol=y" "$OUTDIR/.config" || { echo "Required feature missing: $symbol" >&2; exit 1; }
+done
+if susfs_included; then
+  grep -qx 'CONFIG_KSU_SUSFS=y' "$OUTDIR/.config" || exit 1
+fi
+if [ "$NM" = "true" ]; then
+  grep -qx 'CONFIG_NOMOUNT=y' "$OUTDIR/.config" || exit 1
+fi
+if [ -n "${SPOOF_UNAME:-}" ]; then
+  grep -Fx "#define UTS_RELEASE \"$SPOOF_UNAME\"" "$OUTDIR/include/generated/utsrelease.h" || exit 1
+fi
+cp "$OUTDIR/.config" "$RELEASE_DIR/final-config-${BUILD_NAME}.txt"
+{
+  echo "kernel=$(git -C "$KSRC" rev-parse HEAD)"
+  echo "susfs=$(git -C "$SUSFS_DIR" rev-parse HEAD)"
+  [ ! -d "$KSRC/KernelSU" ] || echo "kernelsu=$(git -C "$KSRC/KernelSU" rev-parse HEAD)"
+  [ ! -d "$KSRC/NoMount" ] || echo "nomount=$(git -C "$KSRC/NoMount" rev-parse HEAD)"
+  echo "actual_linux=$LINUX_VERSION"
+  echo "requested_uname=${SPOOF_UNAME:-}"
+  echo "build_time=$KBUILD_BUILD_TIMESTAMP"
+  cat "$OUTDIR/include/generated/utsrelease.h" "$OUTDIR/include/generated/compile.h"
+} > "$RELEASE_DIR/provenance-${BUILD_NAME}.txt"
+
+if [ -n "${SPOOF_BUILD_TIME:-}" ]; then
+  grep -F "$SPOOF_BUILD_TIME" "$OUTDIR/include/generated/compile.h" || exit 1
+fi
 log "Cloning anykernel from $(simplify_gh_url "$ANYKERNEL_REPO")"
 git clone -q --depth=1 $ANYKERNEL_REPO anykernel
 

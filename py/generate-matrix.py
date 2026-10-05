@@ -71,6 +71,10 @@ def generate_matrix() -> Dict[str, List[Dict[str, Any]]]:
 		if get_env_bool(env_var):
 			variant_entries.extend(configs)
 
+	selected_variant = os.environ.get("BUILD_VARIANT", "All").strip() or "All"
+	if selected_variant != "All":
+		variant_entries = [v for v in variant_entries if v["name"] == selected_variant]
+
 	if not variant_entries:
 		raise ValueError(
 			"No build configurations selected! "
