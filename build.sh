@@ -64,6 +64,19 @@ else
   git clone -q --depth=1 "$KERNEL_REPO" -b "$KERNEL_BRANCH" "$KSRC"
 fi
 
+if [ "$KERNEL_VERSION" = "5.10" ]; then
+  # Match the device's actual Android 12 5.10.236 base, not moving LTS.
+  STOCK_KERNEL_COMMIT="f997514b333d612613451afbcd601a6f2846d053"
+  git -C "$KSRC" fetch --depth=1 origin "$STOCK_KERNEL_COMMIT" || exit 1
+  git -C "$KSRC" checkout --detach "$STOCK_KERNEL_COMMIT" || exit 1
+  ACTUAL_VERSION=$(make -s -C "$KSRC" kernelversion)
+  if [ "$ACTUAL_VERSION" != "5.10.236" ]; then
+    echo "Wrong kernel source: expected 5.10.236, got $ACTUAL_VERSION" >&2
+    exit 1
+  fi
+  echo "Verified stock source: $ACTUAL_VERSION / $(git -C "$KSRC" rev-parse HEAD)"
+fi
+
 cd $KSRC
 LINUX_VERSION=$(make kernelversion)
 LINUX_VERSION_CODE=${LINUX_VERSION//./}

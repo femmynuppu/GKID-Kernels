@@ -16,7 +16,7 @@ declare -A GKI_BRANCH=(
 )
 
 declare -A GKI_AOSP_BRANCH=(
-  ["5.10"]="android12-5.10-lts"
+  ["5.10"]="deprecated/android12-5.10-2025-05"
   ["5.15"]="android13-5.15-lts"
   ["6.6"]="android15-6.6-lts"
   ["6.12"]="android16-6.12-lts"
